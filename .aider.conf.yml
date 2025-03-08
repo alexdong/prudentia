@@ -1,0 +1,10 @@
+model: claude-3-5-sonnet-20241022
+cache-prompts: true
+cache-keepalive-pings: 2
+stream: false
+auto-commits: true
+watch-files: true
+read:
+  - Python.md
+  - README.md
+  - requirements.txt
