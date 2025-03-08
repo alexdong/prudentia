@@ -1,4 +1,4 @@
-model: claude-3-5-sonnet-20241022
+model: claude-3-7-sonnet-20250219
 cache-prompts: true
 cache-keepalive-pings: 2
 stream: false
@@ -7,4 +7,5 @@ watch-files: true
 read:
   - Python.md
   - README.md
-  - requirements.txt
+  - pyproject.toml
+  - llms-ctx.txt
