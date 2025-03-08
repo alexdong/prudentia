@@ -2,7 +2,7 @@
 
 ## Development Environment
 
-- Python: 3.11
+- Python: 3.12
 - Tools: `ruff` `mypy`, `pyright` and `py.test`
 - Dev Env: osx 15.1 with brew and common utils installed. 
 - AI Availability: both Claude and OpenAI API KEYs available through environment variables
