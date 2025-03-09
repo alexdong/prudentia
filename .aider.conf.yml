@@ -9,3 +9,4 @@ read:
   - README.md
   - pyproject.toml
   - llms-ctx.txt
+  - toolsepc-ctx.md

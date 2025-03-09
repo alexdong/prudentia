@@ -1,0 +1,640 @@
+# Open WebUI Tool Development Guide Summary
+
+## What are Tools?
+Tools are Python scripts that extend the capabilities of LLMs in Open WebUI. They allow LLMs to interact with external resources and perform actions, such as web searching, accessing APIs, and more. Tools require LLMs with function calling support to be reliably used.
+
+## Using Tools in Open WebUI
+1. **Assign Tools to Models:** Go to Workspace => Models, edit a model, and scroll to the "Tools" section. Check the boxes next to the Tools you want to enable for that model and save.
+2. **Using Tools in Chat:** When chatting with a model that has Tools enabled, you can click the "+" icon to manually select and use available Tools.
+3. **LLM Tool Invocation:** Enabling a Tool does not guarantee its use. The LLM decides whether and when to use an enabled Tool based on the conversation context.
+4. **AutoTool Filter (Community Site):** The community site offers an AutoTool Filter to help LLMs automatically select relevant Tools.  Even with the filter, Tools must still be enabled for the model in Open WebUI.
+
+## Installing Tools
+You can install Tools in two ways:
+
+**1. Manual Download and Import:**
+    - Go to the Open WebUI Community Tools page: [https://openwebui.com/tools/](https://openwebui.com/tools/)
+    - Select a Tool and click "Get" -> "Download as JSON export".
+    - In Open WebUI, go to Workspace => Tools and click "Import Tools".
+    - Upload the downloaded JSON file.
+
+**2. Import via Open WebUI URL:**
+    - Go to the Open WebUI Community Tools page: [https://openwebui.com/tools/](https://openwebui.com/tools/)
+    - Select a Tool and click "Get" -> "Import to WebUI".
+    - Enter the IP address of your Open WebUI instance and click "Import to WebUI". This will open your Open WebUI and prompt you to import the Tool.
+
+**Important Note:** You can manually import custom Tools or Tools not listed on the community site using the manual import method. **Exercise caution when importing Tools from untrusted sources as they can execute arbitrary code.**
+
+## Writing Custom Toolkits
+Toolkits are defined in a single Python file.
+
+**1. Top-Level Docstring (Metadata):**
+   - The Python file must start with a docstring containing metadata in the following format:
+     ```python
+     """
+     title: Tool Title
+     author: Your Name
+     author_url: https://your-website.com
+     git_url: https://github.com/your-repo.git
+     description: Short description of the tool.
+     required_open_webui_version: 0.4.0 # Minimum required Open WebUI version
+     requirements: package1, package2 # Python package dependencies
+     version: 0.4.0 # Tool version
+     licence: MIT # License
+     """
+     ```
+
+**2. Tools Class:**
+   - Define your tools as methods within a class named `Tools`.
+   - Optionally, include `Valves` (admin-configurable settings) and `UserValves` (user-configurable settings) as subclasses.
+
+   ```python
+   from pydantic import BaseModel, Field
+
+   class Tools:
+       def __init__(self):
+           """Initialize the Tool (optional)."""
+           self.valves = self.Valves() # Initialize Valves
+
+       class Valves(BaseModel): # Admin Valves
+           api_key: str = Field("", description="Your API key")
+
+       class UserValves(BaseModel): # User Valves
+           option_enabled: bool = Field(False, description="Enable this option")
+
+       def tool_function(self, argument1: str, argument2: int) -> str:
+           """
+           Tool description shown in UI.
+           :param argument1: Description of argument 1.
+           :param argument2: Description of argument 2.
+           """
+           # Tool logic here
+           return "Tool output"
+   ```
+
+**3. Type Hints:**
+   - **Crucial:** Provide type hints for all tool function arguments. This is used to generate the JSON schema for LLM function calls. Nested types (e.g., `list[tuple[str, int]]`) are supported.
+
+**4. Valves and UserValves (Optional but Recommended):**
+   - Use `Valves` and `UserValves` to create configurable settings for your tools.
+   - `Valves` are only configurable by Open WebUI administrators.
+   - `UserValves` are configurable by all users who have access to the tool.
+   - Use `pydantic.BaseModel` and `pydantic.Field` to define valve fields with descriptions.
+
+**5. Optional Arguments in Tool Functions:**
+   - The following optional arguments can be included in your tool function signatures:
+     - `__event_emitter__`: For sending real-time updates to the chat interface (status, messages, citations).
+     - `__event_call__`: Similar to `__event_emitter__` but allows for user interaction and responses.
+     - `__user__`: Dictionary containing user information.
+     - `__metadata__`: Dictionary containing chat metadata.
+     - `__messages__`: List of previous chat messages.
+     - `__files__`: Attached files.
+     - `__model__`: Name of the currently used LLM model.
+
+**6. Event Emitters (`__event_emitter__`)**
+   - Used to send updates and additional content to the chat interface during tool execution.
+
+   - **Types of Events:**
+      - **Status Events:** Display status updates above the chat message.
+         ```python
+         await __event_emitter__({"type": "status", "data": {"description": "Processing...", "done": False}})
+         await __event_emitter__({"type": "status", "data": {"description": "Completed!", "done": True, "hidden": False}}) # Optionally hide status with "hidden": True
+         ```
+      - **Message Events:** Append messages to the chat during or after tool execution.
+         ```python
+         await __event_emitter__({"type": "message", "data": {"content": "Additional information appended to chat."}})
+         ```
+      - **Citation Events:** Add citations/references to the chat message.
+         ```python
+         await __event_emitter__({
+             "type": "citation",
+             "data": {
+                 "document": ["Citation content"],
+                 "metadata": [{"date_accessed": "...", "source": "..."}],
+                 "source": {"name": "Source Name", "url": "http://source-url"},
+             }
+         })
+         ```
+         - To use custom citations, set `self.citation = False` in the `Tools` class `__init__` method to disable default citation generation. If you want to use default citations, set `self.citation = True` (default behavior).
+
+```python
+# https://openwebui.com/t/whirlybird/web_scrape
+"""
+title: Enhanced Web Scrape
+author: ekatiyar
+author_url: https://github.com/ekatiyar
+git_url: https://github.com/ekatiyar/open-webui-tools
+description: An improved web scraping tool that extracts text content using Jina Reader, now with better filtering, user-configuration, and UI feedback using emitters.
+original_author: Pyotr Growpotkin
+original_author_url: https://github.com/christ-offer/
+original_git_url: https://github.com/christ-offer/open-webui-tools
+funding_url: https://github.com/open-webui
+version: 0.0.5
+license: MIT
+"""
+
+import requests
+from typing import Callable, Any
+import re
+from pydantic import BaseModel, Field
+
+import unittest
+
+def extract_title(text):
+  """
+  Extracts the title from a string containing structured text.
+
+  :param text: The input string containing the title.
+  :return: The extracted title string, or None if the title is not found.
+  """
+  match = re.search(r'Title: (.*)\n', text)
+  return match.group(1).strip() if match else None
+
+def clean_urls(text) -> str:
+    """
+    Cleans URLs from a string containing structured text.
+
+    :param text: The input string containing the URLs.
+    :return: The cleaned string with URLs removed.
+    """
+    return re.sub(r'\((http[^)]+)\)', '', text)
+
+class EventEmitter:
+    def __init__(self, event_emitter: Callable[[dict], Any] = None):
+        self.event_emitter = event_emitter
+
+    async def progress_update(self, description):
+        await self.emit(description)
+
+    async def error_update(self, description):
+        await self.emit(description, "error", True)
+
+    async def success_update(self, description):
+        await self.emit(description, "success", True)
+
+    async def emit(self, description="Unknown State", status="in_progress", done=False):
+        if self.event_emitter:
+            await self.event_emitter(
+                {
+                    "type": "status",
+                    "data": {
+                        "status": status,
+                        "description": description,
+                        "done": done,
+                    },
+                }
+            )
+
+class Tools:
+    class Valves(BaseModel):
+        DISABLE_CACHING: bool = Field(
+            default=False, description="Bypass Jina Cache when scraping"
+        )
+        GLOBAL_JINA_API_KEY: str = Field(
+            default="",
+            description="(Optional) Jina API key. Allows a higher rate limit when scraping. Used when a User-specific API key is not available."
+        )
+        CITITATION: bool = Field(default="True", description="True or false for citation")
+
+    class UserValves(BaseModel):
+        CLEAN_CONTENT: bool = Field(
+            default=True, description="Remove links and image urls from scraped content. This reduces the number of tokens."
+        )
+        JINA_API_KEY: str = Field(
+            default="",
+            description="(Optional) Jina API key. Allows a higher rate limit when scraping."
+        )
+
+    def __init__(self):
+        self.valves = self.Valves()
+        self.citation = self.valves.CITITATION
+
+    async def web_scrape(self, url: str, __event_emitter__: Callable[[dict], Any] = None, __user__: dict = {}) -> str:
+        """
+        Scrape and process a web page using r.jina.ai
+
+        :param url: The URL of the web page to scrape.
+        :return: The scraped and processed webpage content, or an error message.
+        """
+        emitter = EventEmitter(__event_emitter__)
+        if "valves" not in __user__:
+            __user__["valves"] = self.UserValves()
+
+        await emitter.progress_update(f"Scraping {url}")
+        jina_url = f"https://r.jina.ai/{url}"
+
+        headers = {
+            "X-No-Cache": "true" if self.valves.DISABLE_CACHING else "false",
+            "X-With-Generated-Alt": "true",
+        }
+
+        if __user__["valves"].JINA_API_KEY:
+            headers["Authorization"] = f"Bearer {__user__['valves'].JINA_API_KEY}"
+        elif self.valves.GLOBAL_JINA_API_KEY:
+            headers["Authorization"] = f"Bearer {self.valves.GLOBAL_JINA_API_KEY}"
+
+        try:
+            response = requests.get(jina_url, headers=headers)
+            response.raise_for_status()
+
+            should_clean = __user__["valves"].CLEAN_CONTENT
+            if should_clean:
+                await emitter.progress_update("Received content, cleaning up ...")
+            content = clean_urls(response.text) if should_clean else response.text
+
+            title = extract_title(content)
+            await emitter.success_update(f"Successfully Scraped {title if title else url}")
+            return content
+
+        except requests.RequestException as e:
+            error_message = f"Error scraping web page: {str(e)}"
+            await emitter.error_update(error_message)
+            return error_message
+        
+class WebScrapeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_web_scrape(self):
+        url = "https://toscrape.com/"
+        content = await Tools().web_scrape(url)
+        self.assertEqual("Scraping Sandbox", extract_title(content))
+        self.assertEqual(len(content), 770)
+
+if __name__ == "__main__":
+    print("Running tests...")
+    unittest.main()
+```
+
+
+```python
+# open-webui/backend/open_webui/socket/main.py
+import asyncio
+import socketio
+import logging
+import sys
+import time
+
+from open_webui.models.users import Users, UserNameResponse
+from open_webui.models.channels import Channels
+from open_webui.models.chats import Chats
+
+from open_webui.env import (
+    ENABLE_WEBSOCKET_SUPPORT,
+    WEBSOCKET_MANAGER,
+    WEBSOCKET_REDIS_URL,
+    WEBSOCKET_REDIS_LOCK_TIMEOUT,
+)
+from open_webui.utils.auth import decode_token
+from open_webui.socket.utils import RedisDict, RedisLock
+
+from open_webui.env import (
+    GLOBAL_LOG_LEVEL,
+    SRC_LOG_LEVELS,
+)
+
+
+logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
+log = logging.getLogger(__name__)
+log.setLevel(SRC_LOG_LEVELS["SOCKET"])
+
+
+if WEBSOCKET_MANAGER == "redis":
+    mgr = socketio.AsyncRedisManager(WEBSOCKET_REDIS_URL)
+    sio = socketio.AsyncServer(
+        cors_allowed_origins=[],
+        async_mode="asgi",
+        transports=(["websocket"] if ENABLE_WEBSOCKET_SUPPORT else ["polling"]),
+        allow_upgrades=ENABLE_WEBSOCKET_SUPPORT,
+        always_connect=True,
+        client_manager=mgr,
+    )
+else:
+    sio = socketio.AsyncServer(
+        cors_allowed_origins=[],
+        async_mode="asgi",
+        transports=(["websocket"] if ENABLE_WEBSOCKET_SUPPORT else ["polling"]),
+        allow_upgrades=ENABLE_WEBSOCKET_SUPPORT,
+        always_connect=True,
+    )
+
+
+# Timeout duration in seconds
+TIMEOUT_DURATION = 3
+
+# Dictionary to maintain the user pool
+
+if WEBSOCKET_MANAGER == "redis":
+    log.debug("Using Redis to manage websockets.")
+    SESSION_POOL = RedisDict("open-webui:session_pool", redis_url=WEBSOCKET_REDIS_URL)
+    USER_POOL = RedisDict("open-webui:user_pool", redis_url=WEBSOCKET_REDIS_URL)
+    USAGE_POOL = RedisDict("open-webui:usage_pool", redis_url=WEBSOCKET_REDIS_URL)
+
+    clean_up_lock = RedisLock(
+        redis_url=WEBSOCKET_REDIS_URL,
+        lock_name="usage_cleanup_lock",
+        timeout_secs=WEBSOCKET_REDIS_LOCK_TIMEOUT,
+    )
+    aquire_func = clean_up_lock.aquire_lock
+    renew_func = clean_up_lock.renew_lock
+    release_func = clean_up_lock.release_lock
+else:
+    SESSION_POOL = {}
+    USER_POOL = {}
+    USAGE_POOL = {}
+    aquire_func = release_func = renew_func = lambda: True
+
+
+async def periodic_usage_pool_cleanup():
+    if not aquire_func():
+        log.debug("Usage pool cleanup lock already exists. Not running it.")
+        return
+    log.debug("Running periodic_usage_pool_cleanup")
+    try:
+        while True:
+            if not renew_func():
+                log.error(f"Unable to renew cleanup lock. Exiting usage pool cleanup.")
+                raise Exception("Unable to renew usage pool cleanup lock.")
+
+            now = int(time.time())
+            send_usage = False
+            for model_id, connections in list(USAGE_POOL.items()):
+                # Creating a list of sids to remove if they have timed out
+                expired_sids = [
+                    sid
+                    for sid, details in connections.items()
+                    if now - details["updated_at"] > TIMEOUT_DURATION
+                ]
+
+                for sid in expired_sids:
+                    del connections[sid]
+
+                if not connections:
+                    log.debug(f"Cleaning up model {model_id} from usage pool")
+                    del USAGE_POOL[model_id]
+                else:
+                    USAGE_POOL[model_id] = connections
+
+                send_usage = True
+
+            if send_usage:
+                # Emit updated usage information after cleaning
+                await sio.emit("usage", {"models": get_models_in_use()})
+
+            await asyncio.sleep(TIMEOUT_DURATION)
+    finally:
+        release_func()
+
+
+app = socketio.ASGIApp(
+    sio,
+    socketio_path="/ws/socket.io",
+)
+
+
+def get_models_in_use():
+    # List models that are currently in use
+    models_in_use = list(USAGE_POOL.keys())
+    return models_in_use
+
+
+@sio.on("usage")
+async def usage(sid, data):
+    model_id = data["model"]
+    # Record the timestamp for the last update
+    current_time = int(time.time())
+
+    # Store the new usage data and task
+    USAGE_POOL[model_id] = {
+        **(USAGE_POOL[model_id] if model_id in USAGE_POOL else {}),
+        sid: {"updated_at": current_time},
+    }
+
+    # Broadcast the usage data to all clients
+    await sio.emit("usage", {"models": get_models_in_use()})
+
+
+@sio.event
+async def connect(sid, environ, auth):
+    user = None
+    if auth and "token" in auth:
+        data = decode_token(auth["token"])
+
+        if data is not None and "id" in data:
+            user = Users.get_user_by_id(data["id"])
+
+        if user:
+            SESSION_POOL[sid] = user.model_dump()
+            if user.id in USER_POOL:
+                USER_POOL[user.id] = USER_POOL[user.id] + [sid]
+            else:
+                USER_POOL[user.id] = [sid]
+
+            # print(f"user {user.name}({user.id}) connected with session ID {sid}")
+            await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
+            await sio.emit("usage", {"models": get_models_in_use()})
+
+
+@sio.on("user-join")
+async def user_join(sid, data):
+
+    auth = data["auth"] if "auth" in data else None
+    if not auth or "token" not in auth:
+        return
+
+    data = decode_token(auth["token"])
+    if data is None or "id" not in data:
+        return
+
+    user = Users.get_user_by_id(data["id"])
+    if not user:
+        return
+
+    SESSION_POOL[sid] = user.model_dump()
+    if user.id in USER_POOL:
+        USER_POOL[user.id] = USER_POOL[user.id] + [sid]
+    else:
+        USER_POOL[user.id] = [sid]
+
+    # Join all the channels
+    channels = Channels.get_channels_by_user_id(user.id)
+    log.debug(f"{channels=}")
+    for channel in channels:
+        await sio.enter_room(sid, f"channel:{channel.id}")
+
+    # print(f"user {user.name}({user.id}) connected with session ID {sid}")
+
+    await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
+    return {"id": user.id, "name": user.name}
+
+
+@sio.on("join-channels")
+async def join_channel(sid, data):
+    auth = data["auth"] if "auth" in data else None
+    if not auth or "token" not in auth:
+        return
+
+    data = decode_token(auth["token"])
+    if data is None or "id" not in data:
+        return
+
+    user = Users.get_user_by_id(data["id"])
+    if not user:
+        return
+
+    # Join all the channels
+    channels = Channels.get_channels_by_user_id(user.id)
+    log.debug(f"{channels=}")
+    for channel in channels:
+        await sio.enter_room(sid, f"channel:{channel.id}")
+
+
+@sio.on("channel-events")
+async def channel_events(sid, data):
+    room = f"channel:{data['channel_id']}"
+    participants = sio.manager.get_participants(
+        namespace="/",
+        room=room,
+    )
+
+    sids = [sid for sid, _ in participants]
+    if sid not in sids:
+        return
+
+    event_data = data["data"]
+    event_type = event_data["type"]
+
+    if event_type == "typing":
+        await sio.emit(
+            "channel-events",
+            {
+                "channel_id": data["channel_id"],
+                "message_id": data.get("message_id", None),
+                "data": event_data,
+                "user": UserNameResponse(**SESSION_POOL[sid]).model_dump(),
+            },
+            room=room,
+        )
+
+
+@sio.on("user-list")
+async def user_list(sid):
+    await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
+
+
+@sio.event
+async def disconnect(sid):
+    if sid in SESSION_POOL:
+        user = SESSION_POOL[sid]
+        del SESSION_POOL[sid]
+
+        user_id = user["id"]
+        USER_POOL[user_id] = [_sid for _sid in USER_POOL[user_id] if _sid != sid]
+
+        if len(USER_POOL[user_id]) == 0:
+            del USER_POOL[user_id]
+
+        await sio.emit("user-list", {"user_ids": list(USER_POOL.keys())})
+    else:
+        pass
+        # print(f"Unknown session ID {sid} disconnected")
+
+
+def get_event_emitter(request_info):
+    async def __event_emitter__(event_data):
+        user_id = request_info["user_id"]
+        session_ids = list(
+            set(USER_POOL.get(user_id, []) + [request_info["session_id"]])
+        )
+
+        for session_id in session_ids:
+            await sio.emit(
+                "chat-events",
+                {
+                    "chat_id": request_info.get("chat_id", None),
+                    "message_id": request_info.get("message_id", None),
+                    "data": event_data,
+                },
+                to=session_id,
+            )
+
+        if "type" in event_data and event_data["type"] == "status":
+            Chats.add_message_status_to_chat_by_id_and_message_id(
+                request_info["chat_id"],
+                request_info["message_id"],
+                event_data.get("data", {}),
+            )
+
+        if "type" in event_data and event_data["type"] == "message":
+            message = Chats.get_message_by_id_and_message_id(
+                request_info["chat_id"],
+                request_info["message_id"],
+            )
+
+            content = message.get("content", "")
+            content += event_data.get("data", {}).get("content", "")
+
+            Chats.upsert_message_to_chat_by_id_and_message_id(
+                request_info["chat_id"],
+                request_info["message_id"],
+                {
+                    "content": content,
+                },
+            )
+
+        if "type" in event_data and event_data["type"] == "replace":
+            content = event_data.get("data", {}).get("content", "")
+
+            Chats.upsert_message_to_chat_by_id_and_message_id(
+                request_info["chat_id"],
+                request_info["message_id"],
+                {
+                    "content": content,
+                },
+            )
+
+    return __event_emitter__
+
+
+def get_event_call(request_info):
+    async def __event_caller__(event_data):
+        response = await sio.call(
+            "chat-events",
+            {
+                "chat_id": request_info.get("chat_id", None),
+                "message_id": request_info.get("message_id", None),
+                "data": event_data,
+            },
+            to=request_info["session_id"],
+        )
+        return response
+
+    return __event_caller__
+
+
+get_event_caller = get_event_call
+
+
+def get_user_id_from_session_pool(sid):
+    user = SESSION_POOL.get(sid)
+    if user:
+        return user["id"]
+    return None
+
+
+def get_user_ids_from_room(room):
+    active_session_ids = sio.manager.get_participants(
+        namespace="/",
+        room=room,
+    )
+
+    active_user_ids = list(
+        set(
+            [SESSION_POOL.get(session_id[0])["id"] for session_id in active_session_ids]
+        )
+    )
+    return active_user_ids
+
+
+def get_active_status_by_user_id(user_id):
+    if user_id in USER_POOL:
+        return True
+    return False
+```
